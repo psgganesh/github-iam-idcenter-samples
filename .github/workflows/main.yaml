@@ -1,0 +1,23 @@
+name: Github AWS OIDC
+on:
+  push:
+    branches: [ "main", "master" ]
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  oidc-test:
+    runs-on: [ ubuntu-latest ]
+    steps:
+      - name: Checkout Source
+        uses: actions/checkout@v4
+      - name: Configure AWS Credentials using OIDC
+        uses: aws-actions/configure-aws-credentials@v6.1.0
+        with:
+          aws-region: ap-southeast-2
+          role-to-assume: ${{ secrets.AWS_IAM_ROLE }}
+          role-session-name: ShortLivedGithubActionSession
+      - name: Test AWS Credentials
+        run: aws sts get-caller-identity
