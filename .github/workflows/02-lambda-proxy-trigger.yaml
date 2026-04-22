@@ -1,0 +1,97 @@
+name: Trigger Argo Workflow via Lambda Gateway
+
+on:
+  push:
+    branches:
+      - main
+      - 'release/*'
+      - develop
+  workflow_dispatch:  # Manual trigger
+
+permissions:
+  id-token: write   # Required for GitHub OIDC token
+  contents: read     # Required for actions/checkout
+
+jobs:
+  trigger-argo:
+    runs-on: ubuntu-latest
+    steps:
+
+      # ---- Step 1: Checkout Code ----
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # ---- Step 2: Get GitHub OIDC Token ----
+      - name: Get GitHub OIDC Token
+        id: get-token
+        run: |
+          # Request OIDC token from GitHub's token endpoint
+          OIDC_TOKEN=$(curl -s -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" | jq -r '.value')
+
+          if [ -z "$OIDC_TOKEN" ] || [ "$OIDC_TOKEN" == "null" ]; then
+            echo "❌ Failed to retrieve OIDC token"
+            exit 1
+          fi
+
+          echo "✅ OIDC token retrieved successfully"
+          echo "token=$OIDC_TOKEN" >> $GITHUB_OUTPUT
+
+      # ---- Step 3: Call Lambda Gateway ----
+      - name: Submit Argo Workflow via Lambda Gateway
+        id: submit-workflow
+        run: |
+          echo "🚀 Calling Argo Workflow Gateway..."
+          echo "   Repository: ${{ github.repository }}"
+          echo "   Branch:     ${{ github.ref_name }}"
+          echo "   SHA:        ${{ github.sha }}"
+          echo "   Actor:      ${{ github.actor }}"
+
+          RESPONSE=$(curl -s -w "%{http_code}" -X POST \
+            "${{ secrets.ARGO_GATEWAY_URL }}" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "github_token": "${{ steps.get-token.outputs.token }}",
+              "workflow_params": {
+                "workflow_template": "hello-world-template",
+                "parameters": {
+                  "message": "Triggered from GitHub Actions",
+                  "environment": "production"
+                }
+              }
+            }')
+
+          # Extract HTTP status code (last line) and body (everything else)
+          HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+          BODY=$(echo "$RESPONSE" | sed '$d')
+
+          echo "📋 Response (HTTP $HTTP_CODE):"
+          echo "$BODY" | jq . 2>/dev/null || echo "$BODY"
+
+          # Check for success
+          if [ "$HTTP_CODE" -ne 200 ]; then
+            echo "❌ Gateway returned HTTP $HTTP_CODE"
+            echo "   Error: $(echo "$BODY" | jq -r '.message // .error // "Unknown error"' 2>/dev/null)"
+            exit 1
+          fi
+
+          echo "✅ Argo Workflow submitted successfully!"
+          echo "response=$BODY" >> $GITHUB_OUTPUT
+
+      # ---- Step 4: Display Results ----
+      - name: Display Workflow Details
+        if: success()
+        run: |
+          echo "=========================================="
+          echo "✅ Argo Workflow Submission Summary"
+          echo "=========================================="
+          echo "Repository:  ${{ github.repository }}"
+          echo "Branch:      ${{ github.ref_name }}"
+          echo "Commit SHA:  ${{ github.sha }}"
+          echo "Actor:       ${{ github.actor }}"
+          echo "Event:       ${{ github.event_name }}"
+          echo "=========================================="
+          echo ""
+          echo "📋 Gateway Response:"
+          echo '${{ steps.submit-workflow.outputs.response }}' | jq . 2>/dev/null || echo "See step output above"
+
