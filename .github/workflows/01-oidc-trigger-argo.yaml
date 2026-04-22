@@ -5,6 +5,12 @@ on:
   push:
     branches: [main]
 
+
+permissions:
+  id-token: write
+  contents: read
+
+
 jobs:
   trigger-argo:
     runs-on: ubuntu-latest
