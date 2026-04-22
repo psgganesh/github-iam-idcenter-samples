@@ -1,4 +1,4 @@
-name: Trigger Argo Workflow via Lambda Gateway
+name: Lambda Gateway proxy trigger
 
 on:
   push:
