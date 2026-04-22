@@ -7,6 +7,7 @@ metadata:
   labels:
     app: github-actions-demo
 spec:
+  serviceAccountName: github-actions-sa
   entrypoint: main
   arguments:
     parameters:
