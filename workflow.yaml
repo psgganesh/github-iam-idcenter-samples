@@ -1,0 +1,82 @@
+
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: hello-world-
+  namespace: argo
+  labels:
+    app: github-actions-demo
+spec:
+  entrypoint: main
+  arguments:
+    parameters:
+      - name: git-sha
+        value: "unknown"
+      - name: branch
+        value: "unknown"
+      - name: message
+        value: "Hello from Argo Workflows on EKS!"
+
+  templates:
+    # ---- Entrypoint: orchestrates the steps ----
+    - name: main
+      steps:
+        - - name: greet
+            template: hello
+        - - name: print-git-info
+            template: git-info
+        - - name: do-work
+            template: simulate-work
+
+    # ---- Step 1: Simple Hello World ----
+    - name: hello
+      container:
+        image: alpine:3.19
+        command: ["/bin/sh", "-c"]
+        args:
+          - |
+            echo "============================================"
+            echo "  🚀 Hello World from Argo Workflows!"
+            echo "============================================"
+            echo ""
+            echo "Message: {{workflow.parameters.message}}"
+            echo "Workflow Name: {{workflow.name}}"
+            echo "Workflow UID: {{workflow.uid}}"
+            echo "Timestamp: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+            echo ""
+            echo "✅ Step 1 complete!"
+
+    # ---- Step 2: Print Git context passed from GitHub Actions ----
+    - name: git-info
+      container:
+        image: alpine:3.19
+        command: ["/bin/sh", "-c"]
+        args:
+          - |
+            echo "============================================"
+            echo "  📦 Git Context from GitHub Actions"
+            echo "============================================"
+            echo ""
+            echo "Git SHA:  {{workflow.parameters.git-sha}}"
+            echo "Branch:   {{workflow.parameters.branch}}"
+            echo ""
+            echo "✅ Step 2 complete!"
+
+    # ---- Step 3: Simulate some work ----
+    - name: simulate-work
+      container:
+        image: alpine:3.19
+        command: ["/bin/sh", "-c"]
+        args:
+          - |
+            echo "============================================"
+            echo "  ⚙️  Simulating Work..."
+            echo "============================================"
+            echo ""
+            for i in 1 2 3 4 5; do
+              echo "Processing item $i of 5..."
+              sleep 2
+            done
+            echo ""
+            echo "🎉 All work complete! Workflow finished successfully."
+
