@@ -16,11 +16,13 @@ jobs:
       - name: Checkout Source
         uses: actions/checkout@v5
 
+      - name: Install RUST
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          
       - name: Install Cedar CLI
         run: |
-          curl -L https://github.com/cedar-policy/cedar/releases/latest/download/cedar-x86_64-unknown-linux-gnu.tar.gz -o cedar.tar.gz
-          tar -xzf cedar.tar.gz
-          sudo mv cedar /usr/local/bin/
+          cargo install cedar-policy-cli
           cedar --version
 
       - name: Setup Terraform
