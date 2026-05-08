@@ -43,17 +43,15 @@ def main():
         decision, rc = run_check(args.policies, args.schema, args.entities, stmt_id)
         if "DENY" in decision:
             failures.append(stmt_id)
-            print(f"❌ FAILED: {stmt_id}")
+            print(f"FAILED: {stmt_id}")
         else:
-            print(f"✅ PASSED: {stmt_id}")
+            print(f"PASSED: {stmt_id}")
 
     if failures:
-        print(f"
-🚫 {len(failures)} policy statement(s) violate compliance rules.")
+        print(f"{len(failures)} policy statement(s) violate compliance rules.")
         sys.exit(1)
     else:
-        print(f"
-✅ All {len(statements)} statement(s) are compliant.")
+        print(f"All {len(statements)} statement(s) are compliant.")
         sys.exit(0)
 
 if __name__ == "__main__":
