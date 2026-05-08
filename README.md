@@ -25,6 +25,33 @@ The key insight: **Cedar `authorize`** evaluates whether a request is permitted.
 
 ---
 
+## Cedar IAM Policy Validation — Repository Structure
+
+```
+github-repo/
+├── .github/
+│   └── workflows/
+│       └── iam-policy-check.yml          # The GitHub Action
+│
+├── cedar/
+│   ├── schema.cedarschema                # Cedar schema definition
+│   └── rules.cedar                       # Your compliance rules (forbid policies)
+│
+├── scripts/
+│   ├── iam_to_cedar_entities.py          # Converts tfplan.json → entities.json
+│   └── run_cedar_checks.py              # Runs cedar authorize per statement
+│
+├── terraform/                            # Terraform IAM policies & roles
+│   ├── main.tf                          # The IAM policies & roles
+│   ├── variables.tf                     # (optional) extracted variables
+│   ├── outputs.tf                       # (optional) extracted outputs
+│   └── backend.tf                       # (optional) state backend config
+│
+└── README.md
+```
+
+---
+
 ## 1. Cedar Schema (`schema.cedarschema`)
 
 ```cedar
