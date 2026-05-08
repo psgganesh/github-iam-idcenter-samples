@@ -1,6 +1,8 @@
 name: Cedar IAM Policy Validation
 
 on:
+  push:
+    branches: [ "dev/cedar" ]
   pull_request:
     paths:
       - 'terraform/**'
