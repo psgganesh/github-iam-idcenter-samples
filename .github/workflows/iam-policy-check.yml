@@ -1,0 +1,49 @@
+name: Cedar IAM Policy Validation
+
+on:
+  pull_request:
+    paths:
+      - 'terraform/**'
+      - 'account-templates/**'
+      - 'cedar/**'
+
+jobs:
+  validate-iam-policies:
+    runs-on: [ ubuntu-latest ]
+    steps:
+      - name: Checkout Source
+        uses: actions/checkout@v5
+
+      - name: Install Cedar CLI
+        run: |
+          curl -L https://github.com/cedar-policy/cedar/releases/latest/download/cedar-x86_64-unknown-linux-gnu.tar.gz -o cedar.tar.gz
+          tar -xzf cedar.tar.gz
+          sudo mv cedar /usr/local/bin/
+          cedar --version
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Terraform Init & Plan
+        run: |
+          cd terraform/
+          terraform init
+          terraform plan -out=tfplan
+          terraform show -json tfplan > tfplan.json
+
+      - name: Convert IAM Policies to Cedar Entities
+        run: |
+          python3 scripts/iam_to_cedar_entities.py terraform/tfplan.json > entities.json          
+
+      - name: Validate Cedar Schema
+        run: |
+          cedar validate \
+            --schema cedar/schema.cedarschema \
+            --policies cedar/rules.cedar
+
+      - name: Run Cedar Authorization Checks
+        run: |
+          python3 scripts/run_cedar_checks.py \
+            --policies cedar/rules.cedar \
+            --schema cedar/schema.cedarschema \
+            --entities entities.json
