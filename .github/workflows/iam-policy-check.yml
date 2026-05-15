@@ -1,29 +1,22 @@
-name: Cedar IAM Policy Validation
+name: IAM Policy Validation
 
 on:
   push:
-    branches: [ "dev/cedar" ]
+    branches: [ "dev/opa" ]
   pull_request:
-    paths:
-      - 'terraform/**'
-      - 'account-templates/**'
-      - 'cedar/**'
+    branches: [ "main", "dev/opa" ]
 
 jobs:
   validate-iam-policies:
     runs-on: [ ubuntu-latest ]
     steps:
       - name: Checkout Source
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
 
-      - name: Install RUST
-        run: |
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-          
-      - name: Install Cedar CLI
-        run: |
-          cargo install cedar-policy-cli
-          cedar --version
+      - name: Download OPA
+        uses: open-policy-agent/setup-opa@v2
+        with:
+          version: edge
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v4
@@ -35,19 +28,46 @@ jobs:
           terraform plan -out=tfplan
           terraform show -json tfplan > tfplan.json
 
-      - name: Convert IAM Policies to Cedar Entities
+      - name: Extract IAM Policies from Plan
         run: |
-          python3 scripts/iam_to_cedar_entities.py terraform/tfplan.json > entities.json          
+          python3 -c "
+          import json, os
+          with open('terraform/tfplan.json') as f:
+              plan = json.load(f)
+          os.makedirs('opa_inputs', exist_ok=True)
+          for rc in plan.get('resource_changes', []):
+              if rc['type'] in ('aws_iam_policy', 'aws_iam_role_policy'):
+                  after = rc.get('change', {}).get('after', {})
+                  policy_doc = json.loads(after.get('policy', '{}'))
+                  if policy_doc.get('Statement'):
+                      filename = rc['address'].replace('.', '_') + '.json'
+                      with open(f'opa_inputs/{filename}', 'w') as out:
+                          json.dump(policy_doc, out, indent=2)
+                      print(f'Extracted: {filename}')
+          "
 
-      - name: Validate Cedar Schema
+      - name: Run OPA Policy Checks
         run: |
-          cedar validate \
-            --schema cedar/schema.cedarschema \
-            --policies cedar/rules.cedar
-
-      - name: Run Cedar Authorization Checks
-        run: |
-          python3 scripts/run_cedar_checks.py \
-            --policies cedar/rules.cedar \
-            --schema cedar/schema.cedarschema \
-            --entities entities.json
+          echo "=== Running OPA IAM Policy Validation ==="
+          FAILED=0
+          for policy_file in opa_inputs/*.json; do
+            if [ -f "$policy_file" ]; then
+              echo ""
+              echo "--- Evaluating: $policy_file ---"
+              RESULT=$(opa eval -i "$policy_file" -d policies/ "data.iam.result" --format pretty)
+              echo "$RESULT"
+              if echo "$RESULT" | grep -q '"permit": false'; then
+                echo "FAILED: $policy_file violates IAM policy guardrails"
+                FAILED=1
+              else
+                echo "PASSED: $policy_file"
+              fi
+            fi
+          done
+          echo ""
+          echo "=== Validation Complete ==="
+          if [ $FAILED -eq 1 ]; then
+            echo "One or more IAM policies violate organisational security rules."
+            exit 1
+          fi
+          echo "All IAM policies are compliant."
