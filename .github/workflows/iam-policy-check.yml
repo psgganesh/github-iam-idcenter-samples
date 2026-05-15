@@ -3,6 +3,8 @@ name: IAM Policy Validation
 on:
   push:
     branches: [ "dev/opa" ]
+  pull_request:
+    branches: [ "main", "dev/opa" ]
 
 jobs:
   validate-iam-policies:
@@ -10,44 +12,70 @@ jobs:
     steps:
       - name: Checkout Source
         uses: actions/checkout@v6
-      
+
       - name: Download OPA
         uses: open-policy-agent/setup-opa@b2b258e089860efaadaaf71bf6e3aecb4a3eeff1 # v2.4.0
         with:
-          version: latest # install the latest version
+          version: latest
 
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v4
+      - name: Run OPA Tests
+        run: opa test policies/ -v
 
-      - name: Terraform Init & Plan
-        run: |
-          cd terraform/
-          terraform init
-          terraform plan -out=tfplan
-          terraform show -json tfplan > tfplan.json
-
-      - name: Extract IAM Policies from Plan
+      - name: Extract IAM Policies from Terraform Source
         run: |
           python3 -c "
-          import json, os
-          with open('terraform/tfplan.json') as f:
-              plan = json.load(f)
+          import json, os, re, glob
+
           os.makedirs('opa_inputs', exist_ok=True)
-          for rc in plan.get('resource_changes', []):
-              if rc['type'] in ('aws_iam_policy', 'aws_iam_role_policy'):
-                  after = rc.get('change', {}).get('after', {})
-                  policy_doc = json.loads(after.get('policy', '{}'))
-                  if policy_doc.get('Statement'):
-                      filename = rc['address'].replace('.', '_') + '.json'
-                      with open(f'opa_inputs/{filename}', 'w') as out:
-                          json.dump(policy_doc, out, indent=2)
-                      print(f'Extracted: {filename}')
+          count = 0
+
+          for tf_file in glob.glob('terraform/*.tf'):
+              with open(tf_file) as f:
+                  content = f.read()
+
+              # Find all jsonencode({...}) blocks that contain Statement
+              # We look for policy = jsonencode(...) patterns
+              pattern = r'policy\s*=\s*jsonencode\((\{.*?\})\s*\)'
+              matches = re.findall(pattern, content, re.DOTALL)
+
+              for match in matches:
+                  # Convert HCL-style jsonencode content to valid JSON
+                  # Replace = with :, add quotes around keys, handle trailing commas
+                  hcl = match
+                  # Replace HCL = with JSON :
+                  hcl = re.sub(r'(\w+)\s*=', r'\"\1\":', hcl)
+                  # Remove trailing commas before } or ]
+                  hcl = re.sub(r',(\s*[}\]])', r'\1', hcl)
+                  # Replace # comments with nothing (line comments)
+                  hcl = re.sub(r'#[^\n]*', '', hcl)
+                  # Replace // comments
+                  hcl = re.sub(r'//[^\n]*', '', hcl)
+
+                  try:
+                      policy_doc = json.loads(hcl)
+                      if policy_doc.get('Statement'):
+                          count += 1
+                          filename = f'policy_{count}.json'
+                          with open(f'opa_inputs/{filename}', 'w') as out:
+                              json.dump(policy_doc, out, indent=2)
+                          print(f'Extracted: {filename}')
+                  except json.JSONDecodeError as e:
+                      print(f'Warning: Could not parse policy block: {e}')
+                      continue
+
+          if count == 0:
+              print('No IAM policy documents found in terraform/*.tf')
+          else:
+              print(f'Extracted {count} IAM policy document(s)')
           "
 
       - name: Run OPA Policy Checks
         run: |
           echo "=== Running OPA IAM Policy Validation ==="
           FAILED=0
+          PASSED_COUNT=0
+          FAILED_COUNT=0
+
           for policy_file in opa_inputs/*.json; do
             if [ -f "$policy_file" ]; then
               echo ""
@@ -55,15 +83,19 @@ jobs:
               RESULT=$(opa eval -i "$policy_file" -d policies/ "data.iam.result" --format pretty)
               echo "$RESULT"
               if echo "$RESULT" | grep -q '"permit": false'; then
-                echo "FAILED: $policy_file violates IAM policy guardrails"
+                echo "❌ FAILED: $policy_file violates IAM policy guardrails"
                 FAILED=1
+                FAILED_COUNT=$((FAILED_COUNT + 1))
               else
-                echo "PASSED: $policy_file"
+                echo "✅ PASSED: $policy_file"
+                PASSED_COUNT=$((PASSED_COUNT + 1))
               fi
             fi
           done
+
           echo ""
           echo "=== Validation Complete ==="
+          echo "Passed: $PASSED_COUNT | Failed: $FAILED_COUNT"
           if [ $FAILED -eq 1 ]; then
             echo "One or more IAM policies violate organisational security rules."
             exit 1
