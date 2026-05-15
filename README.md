@@ -1,70 +1,133 @@
+# IAM Policy Compliance Gate
 
-# Using Cedar as a Policy-as-Code Compliance Gate for IAM Policies
-
-This is a brilliant approach — using Cedar as a **rules engine** to validate IAM policies from your Terraform plan before they get deployed.
+A **policy-as-code compliance gate** that validates AWS IAM policies from Terraform plans against organisational security rules using OPA (Open Policy Agent), integrated into GitHub Actions.
 
 ## The Core Idea
 
-You're essentially building a **policy-as-code compliance gate** in your GitHub Action:
-
 ```
-Terraform Plan → Extract IAM Policies → Convert to Cedar Entities → Cedar Authorize → Pass/Fail
+Terraform Plan → Extract IAM Policies → OPA Evaluate → Pass/Fail
 ```
 
-## Ideating the "Something"
+Each IAM policy statement planned by Terraform is extracted and evaluated against Rego rules. If any statement violates a rule, the pipeline blocks deployment.
 
-The "something" Cedar runs against is composed of **three pieces**:
-
-| Component | What It Is | Source |
-|-----------|-----------|--------|
-| **Cedar Schema** | Defines entity types (IAMStatement, Action, Resource, etc.) | You write this once |
-| **Cedar Policies (Rules)** | Your allow/deny rules (e.g., "forbid wildcard resources") | You write & maintain these |
-| **Cedar Entities + Requests** | The IAM policy statements modeled as entities, with authorization queries | Generated from `terraform show -json` |
-
-The key insight: **Cedar `authorize`** evaluates whether a request is permitted. So you model each IAM policy statement as an authorization request asking *"Is this policy statement compliant?"* — and your Cedar rules decide.
-
----
-
-## Cedar IAM Policy Validation — Repository Structure
+## Repository Structure
 
 ```
-github-repo/
+github-iam-idcenter-samples/
 ├── .github/
 │   └── workflows/
-│       └── iam-policy-check.yml          # The GitHub Action
+│       └── iam-policy-check.yml          # GitHub Action — runs the compliance gate
 │
-├── cedar/
-│   ├── schema.cedarschema                # Cedar schema definition
-│   └── rules.cedar                       # Your compliance rules (forbid policies)
+├── policies/
+│   ├── helpers.rego                      # Utility functions (glob matching, case normalization)
+│   ├── iam.rego                          # Security rules (denied actions, NotAction, PassRole)
+│   └── iam_test.rego                     # OPA tests
 │
 ├── scripts/
-│   ├── iam_to_cedar_entities.py          # Converts tfplan.json → entities.json
-│   └── run_cedar_checks.py              # Runs cedar authorize per statement
+│   ├── iam_to_cedar_entities.py          # Converts tfplan.json → Cedar entities (experimental)
+│   └── run_cedar_checks.py              # Runs Cedar authorize per statement (experimental)
 │
-├── terraform/                            # Terraform IAM policies & roles
-│   ├── main.tf                          # The IAM policies & roles
-│   ├── variables.tf                     # (optional) extracted variables
-│   ├── outputs.tf                       # (optional) extracted outputs
-│   └── backend.tf                       # (optional) state backend config
+├── terraform/
+│   ├── main.tf                          # Sample IAM policies & roles (intentional violations)
+│   ├── variables.tf
+│   ├── outputs.tf
+│   └── backend.tf
 │
 └── README.md
 ```
 
-## How It Fits Your QDA Workflow
+## How It Works
 
-Since your custom roles are defined in **account templates** and modified via **GitHub PR**, this Cedar validation gate runs automatically when:
+1. **Terraform Plan** — generates a JSON plan containing all IAM policy resources
+2. **Extract** — a Python script parses `tfplan.json` and writes each IAM policy document as a separate JSON file
+3. **OPA Evaluate** — each policy file is evaluated against the Rego rules in `policies/`
+4. **Pass/Fail** — if any policy returns `permit: false`, the workflow fails the PR
 
-1. An account owner submits a PR with new/modified custom role IAM policies
-2. The GitHub Action extracts the planned IAM policies from Terraform
-3. Cedar evaluates each statement against your compliance rules
-4. PR is blocked if any statement violates your rules
+### Pipeline Flow (GitHub Actions)
 
----
+The workflow in `.github/workflows/iam-policy-check.yml` runs on pushes to `dev/opa` and PRs to `main`:
 
-## Summary of the "Something"
+```yaml
+Checkout → Setup OPA → Setup Terraform → Plan → Extract Policies → OPA Eval
+```
 
-The "something" Cedar validates against is a **three-way combination**:
+## Usage
 
-- 🏗️ **Schema** → defines what entities exist (structure)
-- 📜 **Policies (Rules)** → your custom allow/deny compliance rules
-- 📦 **Entities** → the actual IAM statements extracted from `terraform plan -json`, modeled as Cedar entities
+### Run OPA tests locally
+
+```sh
+opa test policies/ -v
+```
+
+### Evaluate a single policy file
+
+```sh
+opa eval -i <policy.json> -d policies/ "data.iam.result" --format pretty
+```
+
+### Run Terraform plan and validate
+
+```sh
+cd terraform/
+terraform init
+terraform plan -out=tfplan
+terraform show -json tfplan > tfplan.json
+```
+
+Then extract and evaluate (as the GitHub Action does):
+
+```sh
+# Extract IAM policies from plan
+python3 -c "
+import json, os
+with open('terraform/tfplan.json') as f:
+    plan = json.load(f)
+os.makedirs('opa_inputs', exist_ok=True)
+for rc in plan.get('resource_changes', []):
+    if rc['type'] in ('aws_iam_policy', 'aws_iam_role_policy'):
+        after = rc.get('change', {}).get('after', {})
+        policy_doc = json.loads(after.get('policy', '{}'))
+        if policy_doc.get('Statement'):
+            filename = rc['address'].replace('.', '_') + '.json'
+            with open(f'opa_inputs/{filename}', 'w') as out:
+                json.dump(policy_doc, out, indent=2)
+"
+
+# Evaluate each policy
+for f in opa_inputs/*.json; do
+  opa eval -i "$f" -d policies/ "data.iam.result" --format pretty
+done
+```
+
+## Security Rules
+
+The rules in `policies/iam.rego` enforce:
+
+- **Denied actions** — blocks privilege escalation (iam:\*, iam:CreateUser, etc.), SSO/identity manipulation, account-level destructive actions, and security control tampering
+- **NotAction evasion** — detects `NotAction` with `Effect: Allow` that implicitly grants denied actions
+- **PassRole scoping** — requires `iam:PassRole` to have a scoped Resource (not `*`) and a `iam:PassedToService` condition
+
+Wildcard matching is bidirectional and case-insensitive, matching real IAM behavior.
+
+## Adding Rules
+
+Edit `_denied_actions` in `policies/iam.rego` to add action patterns. For rules needing more context, add a `deny_<name>` rule set and wire it into the `violations` collection. See `deny_passrole_unscoped` or `deny_notaction` for examples.
+
+## Output
+
+```json
+{
+  "permit": false,
+  "violations": [
+    "Statement[0]: action 'account:EnableRegion' matches denied pattern 'account:EnableRegion'"
+  ]
+}
+```
+
+## QDA Workflow Integration
+
+This compliance gate runs automatically when an account owner submits a PR with new or modified custom role IAM policies. The PR is blocked if any statement violates organisational security rules.
+
+## Experimental: Cedar Path
+
+The `scripts/` directory contains experimental tooling for a Cedar-based approach where IAM statements are modelled as Cedar entities and evaluated via `cedar authorize`. This is a future exploration path alongside the current OPA implementation.
