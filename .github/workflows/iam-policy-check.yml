@@ -12,7 +12,7 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Download OPA
-        uses: open-policy-agent/setup-opa@v2
+        uses: open-policy-agent/setup-opa
         with:
           version: edge
 
