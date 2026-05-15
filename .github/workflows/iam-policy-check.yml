@@ -18,6 +18,9 @@ jobs:
         uses: open-policy-agent/setup-opa@b2b258e089860efaadaaf71bf6e3aecb4a3eeff1 # v2.4.0
         with:
           version: latest
+          
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v4
 
       - name: Configure AWS Credentials using OIDC
         uses: aws-actions/configure-aws-credentials@v6.1.0
