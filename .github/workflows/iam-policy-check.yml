@@ -18,55 +18,50 @@ jobs:
         with:
           version: latest
 
+      - name: Configure AWS Credentials using OIDC
+        uses: aws-actions/configure-aws-credentials@v6.1.0
+        with:
+          aws-region: ap-southeast-2
+          role-to-assume: ${{ secrets.AWS_IAM_ROLE }}
+          role-session-name: ShortLivedGithubActionSession
+          
+      - name: Test AWS Credentials
+        run: aws sts get-caller-identity
+
       - name: Run OPA Tests
         run: opa test policies/ -v
 
-      - name: Extract IAM Policies from Terraform Source
+      - name: Terraform Init & Plan
+        run: |
+          cd terraform/
+          terraform init
+          terraform plan -out=tfplan -refresh=false
+          terraform show -json tfplan > tfplan.json
+
+      - name: Extract IAM Policies from Plan
         run: |
           python3 -c "
-          import json, os, re, glob
+          import json, os
+
+          with open('terraform/tfplan.json') as f:
+              plan = json.load(f)
 
           os.makedirs('opa_inputs', exist_ok=True)
           count = 0
 
-          for tf_file in glob.glob('terraform/*.tf'):
-              with open(tf_file) as f:
-                  content = f.read()
+          for rc in plan.get('resource_changes', []):
+              if rc['type'] in ('aws_iam_policy', 'aws_iam_role_policy'):
+                  after = rc.get('change', {}).get('after', {})
+                  policy_json = after.get('policy', '{}')
+                  policy_doc = json.loads(policy_json)
+                  if policy_doc.get('Statement'):
+                      count += 1
+                      filename = rc['address'].replace('.', '_') + '.json'
+                      with open(f'opa_inputs/{filename}', 'w') as out:
+                          json.dump(policy_doc, out, indent=2)
+                      print(f'Extracted: {filename}')
 
-              # Find all jsonencode({...}) blocks that contain Statement
-              # We look for policy = jsonencode(...) patterns
-              pattern = r'policy\s*=\s*jsonencode\((\{.*?\})\s*\)'
-              matches = re.findall(pattern, content, re.DOTALL)
-
-              for match in matches:
-                  # Convert HCL-style jsonencode content to valid JSON
-                  # Replace = with :, add quotes around keys, handle trailing commas
-                  hcl = match
-                  # Replace HCL = with JSON :
-                  hcl = re.sub(r'(\w+)\s*=', r'\"\1\":', hcl)
-                  # Remove trailing commas before } or ]
-                  hcl = re.sub(r',(\s*[}\]])', r'\1', hcl)
-                  # Replace # comments with nothing (line comments)
-                  hcl = re.sub(r'#[^\n]*', '', hcl)
-                  # Replace // comments
-                  hcl = re.sub(r'//[^\n]*', '', hcl)
-
-                  try:
-                      policy_doc = json.loads(hcl)
-                      if policy_doc.get('Statement'):
-                          count += 1
-                          filename = f'policy_{count}.json'
-                          with open(f'opa_inputs/{filename}', 'w') as out:
-                              json.dump(policy_doc, out, indent=2)
-                          print(f'Extracted: {filename}')
-                  except json.JSONDecodeError as e:
-                      print(f'Warning: Could not parse policy block: {e}')
-                      continue
-
-          if count == 0:
-              print('No IAM policy documents found in terraform/*.tf')
-          else:
-              print(f'Extracted {count} IAM policy document(s)')
+          print(f'Extracted {count} IAM policy document(s)')
           "
 
       - name: Run OPA Policy Checks
