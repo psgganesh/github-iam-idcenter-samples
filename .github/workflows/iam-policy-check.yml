@@ -10,6 +10,7 @@ jobs:
     permissions:
       id-token: write
       contents: read
+      checks: write
     steps:
       - name: Checkout Source
         uses: actions/checkout@v6
@@ -74,6 +75,7 @@ jobs:
           FAILED=0
           PASSED_COUNT=0
           FAILED_COUNT=0
+          TESTCASES=""
 
           for policy_file in opa_inputs/*.json; do
             if [ -f "$policy_file" ]; then
@@ -81,16 +83,29 @@ jobs:
               echo "--- Evaluating: $policy_file ---"
               RESULT=$(opa eval -i "$policy_file" -d policies/ "data.iam.result" --format pretty)
               echo "$RESULT"
+
+              TESTNAME=$(basename "$policy_file")
+
               if echo "$RESULT" | grep -q '"permit": false'; then
                 echo "❌ FAILED: $policy_file violates IAM policy guardrails"
                 FAILED=1
                 FAILED_COUNT=$((FAILED_COUNT + 1))
+                # Escape XML special characters in the result
+                ESCAPED_RESULT=$(echo "$RESULT" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g; s/"/\&quot;/g')
+                TESTCASES="${TESTCASES}    <testcase name=\"${TESTNAME}\" classname=\"IAMPolicy\"><failure message=\"Violates IAM policy guardrails\">${ESCAPED_RESULT}</failure></testcase>\n"
               else
                 echo "✅ PASSED: $policy_file"
                 PASSED_COUNT=$((PASSED_COUNT + 1))
+                TESTCASES="${TESTCASES}    <testcase name=\"${TESTNAME}\" classname=\"IAMPolicy\"/>\n"
               fi
             fi
           done
+
+          TOTAL=$((PASSED_COUNT + FAILED_COUNT))
+
+          # Write JUnit XML report
+          printf '<?xml version="1.0" encoding="UTF-8"?>\n<testsuites>\n  <testsuite name="IAM Policy Validation" tests="%d" failures="%d">\n%b  </testsuite>\n</testsuites>\n' \
+            "$TOTAL" "$FAILED_COUNT" "$TESTCASES" > opa-results.xml
 
           echo ""
           echo "=== Validation Complete ==="
@@ -100,3 +115,9 @@ jobs:
             exit 1
           fi
           echo "All IAM policies are compliant."
+
+      - name: Test Summary
+        uses: test-summary/action@v2
+        with:
+          paths: opa-results.xml
+        if: always()
