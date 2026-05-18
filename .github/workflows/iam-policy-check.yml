@@ -1,0 +1,123 @@
+name: IAM Policy Validation
+
+on:
+  push:
+    branches: [ "dev/opa" ]
+
+jobs:
+  validate-iam-policies:
+    runs-on: ubuntu-24.04
+    permissions:
+      id-token: write
+      contents: read
+      checks: write
+    steps:
+      - name: Checkout Source
+        uses: actions/checkout@v6
+
+      - name: Download OPA
+        uses: open-policy-agent/setup-opa@b2b258e089860efaadaaf71bf6e3aecb4a3eeff1 # v2.4.0
+        with:
+          version: latest
+          
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v4
+
+      - name: Configure AWS Credentials using OIDC
+        uses: aws-actions/configure-aws-credentials@v6.1.0
+        with:
+          aws-region: ap-southeast-2
+          role-to-assume: ${{ secrets.AWS_IAM_ROLE }}
+          role-session-name: ShortLivedGithubActionSession
+          
+      - name: Test AWS Credentials
+        run: aws sts get-caller-identity
+
+      - name: Run OPA Tests
+        run: opa test policies/ -v
+
+      - name: Terraform Init & Plan
+        run: |
+          cd terraform/
+          terraform init
+          terraform plan -out=tfplan -refresh=false
+          terraform show -json tfplan > tfplan.json
+
+      - name: Extract IAM Policies from Plan
+        run: |
+          python3 -c "
+          import json, os
+
+          with open('terraform/tfplan.json') as f:
+              plan = json.load(f)
+
+          os.makedirs('opa_inputs', exist_ok=True)
+          count = 0
+
+          for rc in plan.get('resource_changes', []):
+              if rc['type'] in ('aws_iam_policy', 'aws_iam_role_policy'):
+                  after = rc.get('change', {}).get('after', {})
+                  policy_json = after.get('policy', '{}')
+                  policy_doc = json.loads(policy_json)
+                  if policy_doc.get('Statement'):
+                      count += 1
+                      filename = rc['address'].replace('.', '_') + '.json'
+                      with open(f'opa_inputs/{filename}', 'w') as out:
+                          json.dump(policy_doc, out, indent=2)
+                      print(f'Extracted: {filename}')
+
+          print(f'Extracted {count} IAM policy document(s)')
+          "
+
+      - name: Run OPA Policy Checks
+        run: |
+          echo "=== Running OPA IAM Policy Validation ==="
+          FAILED=0
+          PASSED_COUNT=0
+          FAILED_COUNT=0
+          TESTCASES=""
+
+          for policy_file in opa_inputs/*.json; do
+            if [ -f "$policy_file" ]; then
+              echo ""
+              echo "--- Evaluating: $policy_file ---"
+              RESULT=$(opa eval -i "$policy_file" -d policies/ "data.iam.result" --format pretty)
+              echo "$RESULT"
+
+              TESTNAME=$(basename "$policy_file")
+
+              if echo "$RESULT" | grep -q '"permit": false'; then
+                echo "❌ FAILED: $policy_file violates IAM policy guardrails"
+                FAILED=1
+                FAILED_COUNT=$((FAILED_COUNT + 1))
+                # Escape XML special characters in the result
+                ESCAPED_RESULT=$(echo "$RESULT" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g; s/"/\&quot;/g')
+                TESTCASES="${TESTCASES}    <testcase name=\"${TESTNAME}\" classname=\"IAMPolicy\"><failure message=\"Violates IAM policy guardrails\">${ESCAPED_RESULT}</failure></testcase>\n"
+              else
+                echo "✅ PASSED: $policy_file"
+                PASSED_COUNT=$((PASSED_COUNT + 1))
+                TESTCASES="${TESTCASES}    <testcase name=\"${TESTNAME}\" classname=\"IAMPolicy\"/>\n"
+              fi
+            fi
+          done
+
+          TOTAL=$((PASSED_COUNT + FAILED_COUNT))
+
+          # Write JUnit XML report
+          printf '<?xml version="1.0" encoding="UTF-8"?>\n<testsuites>\n  <testsuite name="IAM Policy Validation" tests="%d" failures="%d">\n%b  </testsuite>\n</testsuites>\n' \
+            "$TOTAL" "$FAILED_COUNT" "$TESTCASES" > opa-results.xml
+
+          echo ""
+          echo "=== Validation Complete ==="
+          echo "Passed: $PASSED_COUNT | Failed: $FAILED_COUNT"
+          if [ $FAILED -eq 1 ]; then
+            echo "One or more IAM policies violate organisational security rules."
+            exit 1
+          fi
+          echo "All IAM policies are compliant."
+
+      - name: Test Summary
+        uses: test-summary/action@v2
+        with:
+          paths: opa-results.xml
+        if: always()
